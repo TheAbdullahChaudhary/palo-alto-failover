@@ -1,0 +1,268 @@
+service: palo-alto-failover
+
+plugins:
+  - serverless-python-requirements
+  - serverless-iam-roles-per-function
+
+custom:
+  config: ${file(config/${param:customer}-${param:stage}.yml)}
+  pythonRequirements:
+    usePoetry: true
+    pythonBin: python3.13
+    layer:
+      name: ${self:service}-layer-${param:customer}-${param:stage}
+      description: Palo Alto Failover Python requirements lambda layer
+      compatibleRuntimes:
+        - python3.13
+
+provider:
+  name: aws
+  region: us-east-1
+  stackName: ${self:service}-${param:customer}-${param:stage}
+  stackTags:
+    Customer: ${param:customer}
+    Application: 'palo-alto-failover'
+    Team: 'Knights/Pathfinders Squad'
+    Stage: ${param:stage}
+    Framework: 'Serverless'
+    PHI: 'true'
+    Environment: ${param:customer}-${param:stage}
+    Version: ${self:provider.environment.VERSION}
+  tags:
+    Customer: ${param:customer}
+    Application: 'palo-alto-failover'
+    Team: 'Knights/Pathfinders Squad'
+    Stage: ${param:stage}
+    Framework: 'Serverless'
+    PHI: 'true'
+    Environment: ${param:customer}-${param:stage}
+    Version: ${self:provider.environment.VERSION}
+  deploymentBucket:
+    name: ${ssm:/serverless/bucket/id}
+    serverSideEncryption: AES256
+  deploymentPrefix: ${param:customer}
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - xray:PutTelemetryRecords
+        - xray:PutTraceSegments
+      Resource: "*"
+  environment:
+    VERSION: 1.1.0
+    LOG_LEVEL: INFO
+    ENVIRONMENT: ${param:stage}
+    REGION: "${self:provider.region}"
+    CUSTOMER: ${param:customer}
+
+package:
+  individually: true
+
+functions:
+  PaloAltoHealthCheck:
+    runtime: python3.13
+    name: palo-alto-health-check-${param:customer}-${param:stage}
+    handler: lambda_functions/palo_alto_health_check/src/lambda_function.lambda_handler
+    iamRoleStatementsName: palo-alto-health-check-${param:customer}-${param:stage}-lambdaRole
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+      - Effect: "Allow"
+        Action:
+          - "secretsmanager:GetSecretValue"
+        Resource:
+          - ${ssm:/palo_alto/secret/api_access/arn}
+      - Effect: "Allow"
+        Action:
+          - "ssm:GetParameter"
+          - "ssm:DescribeParameter"
+        Resource:
+          - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/instance/active/id
+          - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/*/interface/management/id
+          - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/sns/failover/arn
+      - Effect: "Allow"
+        Action:
+          - "lambda:InvokeFunction"
+        Resource:
+          - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:palo-alto-failover-${param:customer}-${param:stage}
+      - Effect: "Allow"
+        Action:
+          - "sns:Publish"
+        Resource:
+          - ${ssm:/palo_alto/sns/failover/arn}
+    events:
+      - schedule:
+          name: palo-alto-health-check-${param:customer}-${param:stage}
+          description: 'Triggers lambda for verifying palo status'
+          rate: "rate(${self:custom.config.healthCheckInterval, 5} minutes)"
+          enabled: ${self:custom.config.healthCheckEnabled, true}
+    timeout: 300
+    reservedConcurrency: 1
+    package:
+      patterns:
+        - '!./**'
+        - lambda_functions/palo_alto_health_check/src/**
+        - lambda_functions/palo_alto_utils/src/**
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    vpc:
+      securityGroupIds:
+        - ${ssm:/${param:customer}/${param:stage}/lambda/sg/id}
+      subnetIds:
+        ${ssm:/${param:customer}/${param:stage}/vpc/subnets/lambda/ids}
+    environment:
+      PALO_ALTO_SECRET_NAME: ${ssm:/palo_alto/secret/api_access/name}
+      CLIENT_NAME: ${param:customer}
+      FAILOVER_FUNCTION: palo-alto-failover-${param:customer}-${param:stage}
+      SNS_FAILOVER_TOPIC: ${ssm:/palo_alto/sns/failover/arn}
+      FAILOVER_TEST: False
+  
+  PaloAltoFailover:
+    runtime: python3.13
+    name: palo-alto-failover-${param:customer}-${param:stage}
+    handler: lambda_functions/palo_alto_failover/src/lambda_function.lambda_handler
+    iamRoleStatementsName: palo-alto-failover-${param:customer}-${param:stage}-lambdaRole
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+      - Effect: "Allow"
+        Action:
+          - "ec2:DisassociateAddress"
+          - "ec2:DescribeInstances"
+          - "ec2:DescribeAddresses"
+          - "ec2:DescribeTags"
+          - "ec2:Describe*"
+          - "ec2:CreateTags"
+          - "ec2:DeleteNetworkInterface"
+          - "ec2:AssignPrivateIpAddresses"
+          - "ec2:StopInstances"
+          - "ec2:ReplaceRoute"
+          - "ec2:CreateNetworkInterface"
+          - "ec2:DescribeNetworkInterfaces"
+          - "ec2:StartInstances"
+          - "ec2:DescribeNetworkInterfaceAttribute"
+          - "ec2:DescribeSubnets"
+          - "ec2:AssociateAddress"
+          - "ec2:DescribeRouteTables"
+        Resource:
+          - "*"
+      - Effect: "Allow"
+        Action:
+          - "ssm:GetParameter"
+          - "ssm:PutParameter"
+        Resource:
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/instance/active/id"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/instance/list/ids"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/*/interface/internal/id"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/*/interface/external/id"
+    timeout: 900
+    package:
+      patterns:
+        - '!./**'
+        - lambda_functions/palo_alto_failover/src/**
+        - lambda_functions/palo_alto_utils/src/**
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    vpc:
+      securityGroupIds:
+        - ${ssm:/${param:customer}/${param:stage}/lambda/sg/id}
+      subnetIds:
+        ${ssm:/${param:customer}/${param:stage}/vpc/subnets/lambda/ids}
+    environment:
+      PALO_ACTIVE_INSTANCE_SSM: /palo_alto/instance/active/id
+      PALO_INSTANCE_LIST_SSM: /palo_alto/instance/list/ids
+      PALO_EIP_ID: ${ssm:/palo_alto/eip/public/id}
+  
+  PaloAltoSyncConfig:
+    runtime: python3.13
+    name: palo-alto-sync-config-${param:customer}-${param:stage}
+    handler: lambda_functions/palo_alto_sync_config/src/lambda_function.lambda_handler
+    iamRoleStatementsName: palo-alto-sync-config-${param:customer}-${param:stage}-lambdaRole
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+      - Effect: "Allow"
+        Action:
+          - "secretsmanager:GetSecretValue"
+        Resource:
+          - ${ssm:/palo_alto/secret/api_access/arn}
+      - Effect: "Allow"
+        Action:
+          - "ssm:GetParameter"
+        Resource:
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/instance/active/id"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/instance/list/ids"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/*/interface/management/id"
+          - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/palo_alto/*/interface/internal/id"
+      - Effect: "Allow"
+        Action:
+          - "s3:*"
+        Resource:
+          - "arn:aws:s3:::${param:customer}-${param:stage}-palo-configs/*"
+          - "arn:aws:s3:::${param:customer}-${param:stage}-palo-configs"
+      - Effect: "Allow"
+        Action:
+          - "ec2:Describe*"
+          - "ec2:StartInstances"
+          - "ec2:StopInstances"
+        Resource:
+          - "*"
+      - Effect: "Allow"
+        Action:
+          - "sns:Publish"
+        Resource:
+          - "${ssm:/palo_alto/sns/config_sync/arn}"
+    events:
+      - schedule:
+          name: palo-alto-sync-config-${param:customer}-${param:stage}
+          description: 'Triggers lambda for syncing palo alto configs'
+          rate: "rate(${self:custom.config.syncConfigInterval, 24} hours)"
+          enabled: ${self:custom.config.syncConfigEnabled, true}
+    timeout: 900
+    package:
+      patterns:
+        - '!./**'
+        - lambda_functions/palo_alto_sync_config/src/**
+        - lambda_functions/palo_alto_utils/src/**
+    layers:
+      - { Ref: PythonRequirementsLambdaLayer }
+    vpc:
+      securityGroupIds:
+        - ${ssm:/${param:customer}/${param:stage}/lambda/sg/id}
+      subnetIds:
+        ${ssm:/${param:customer}/${param:stage}/vpc/subnets/lambda/ids}
+    environment:
+      PALO_ALTO_SECRET_NAME: ${ssm:/palo_alto/secret/api_access/name}
+      PALO_ACTIVE_INSTANCE_SSM: /palo_alto/instance/active/id
+      PALO_ACTIVE_INTERFACE_SSM: /palo_alto/ACTIVE_INSTANCE_ID/interface/management/id
+      PALO_INSTANCE_LIST_SSM: /palo_alto/instance/list/ids
+      PALO_SNS_TOPIC_ARN: ${ssm:/palo_alto/sns/config_sync/arn}
+      PALO_CONFIG_S3_BUCKET: ${param:customer}-${param:stage}-palo-configs
+      XML_PREFIX: ${self:custom.config.xmlPrefix}
+      CONFIG_FILENAME: ${self:custom.config.configFilename}
+
+resources:
+  Resources:
+    # Add the ARN to SSM for each function
+    PaloAltoHealthCheckArn:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /${param:customer}/${param:stage}/${self:service}/palo_alto/health_check/arn
+        Value: !GetAtt PaloAltoHealthCheckLambdaFunction.Arn
+        Type: String
+
+    PaloAltoFailoverArn:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /${param:customer}/${param:stage}/${self:service}/palo_alto/failover/arn
+        Value: !GetAtt PaloAltoFailoverLambdaFunction.Arn
+        Type: String
+
+    PaloAltoSyncConfigArn:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /${param:customer}/${param:stage}/${self:service}/palo_alto/sync_config/arn
+        Value: !GetAtt PaloAltoSyncConfigLambdaFunction.Arn
+        Type: String
+
+    # Override Default Serverless Services
+    IamRoleLambdaExecution:
+      Type: "AWS::IAM::Role"
+      Properties:
+        RoleName: "${self:service}-${param:customer}-${param:stage}"

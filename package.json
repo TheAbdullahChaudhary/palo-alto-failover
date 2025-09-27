@@ -1,0 +1,10 @@
+{
+  "name": "palo-alto-failover",
+  "description": "Dependencies for Palo Alto Failover applications",
+  "version": "1.0.0",
+  "devDependencies": {
+    "serverless": "3.40.0",
+    "serverless-iam-roles-per-function": "3.2.0",
+    "serverless-python-requirements": "6.1.1"
+  }
+}

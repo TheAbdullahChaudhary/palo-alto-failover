@@ -1,0 +1,6 @@
+healthCheckEnabled: true
+healthCheckInterval: 5
+syncConfigEnabled: true
+syncConfigInterval: 24
+xmlPrefix: "<?xml version=\"1.0\"?>"
+configFilename: "paloconfig.xml"
